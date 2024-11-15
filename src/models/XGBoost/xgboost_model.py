@@ -33,6 +33,10 @@ def load_data():
     functional_qap = pd.read_csv(DATA_PATHS["functional_qap"])
     return phenotypic_data, anat_qap, dti_qap, functional_qap
 
+
+from sklearn.metrics import roc_auc_score
+
+
 def train_xgboost(X, y):
     logging.info("Training XGBoost model with optimized hyperparameters...")
 
@@ -72,13 +76,16 @@ def train_xgboost(X, y):
 
     # Evaluate on the test set
     y_pred = best_model.predict(X_test)
+    y_proba = best_model.predict_proba(X_test)[:, 1]  # Probabilities for the positive class
     accuracy = accuracy_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_proba)
     f1 = f1_score(y_test, y_pred, average='weighted')
     precision = precision_score(y_test, y_pred, average='weighted')
     recall = recall_score(y_test, y_pred, average='weighted')
     conf_matrix = confusion_matrix(y_test, y_pred)
 
     logging.info(f"Accuracy on Test Set: {accuracy}")
+    logging.info(f"AUC-ROC: {auc}")
     logging.info(f"F1-Score: {f1}")
     logging.info(f"Precision: {precision}")
     logging.info(f"Recall: {recall}")
@@ -92,15 +99,25 @@ def train_xgboost(X, y):
 
     # SHAP Explainability
     logging.info("Generating SHAP explanations...")
-    explainer = shap.Explainer(best_model.named_steps['xgb'], X_train)
+
+    # Extract PCA components for SHAP feature naming
+    pca_step = best_model.named_steps['pca']
+    pca_feature_names = [f"PCA_{i}" for i in range(pca_step.n_components_)]
+
+    # Prepare SHAP explainer
+    xgb_step = best_model.named_steps['xgb']
+    explainer = shap.Explainer(xgb_step, X_train)
+
+    # Compute SHAP values
     shap_values = explainer(X_test)
 
-    # Plot SHAP summary with accuracy annotation
+    # Generate SHAP summary plot
     plt.figure()
-    shap.summary_plot(shap_values, X_test, show=False)
-    plt.title(f'SHAP Summary Plot for XGBoost\nModel Accuracy: {accuracy:.2f}')
+    shap.summary_plot(shap_values, X_test, feature_names=pca_feature_names, show=False)
+    # plt.title(f'SHAP Summary Plot for XGBoost\nModel Accuracy: {accuracy:.2f}, AUC-ROC: {auc:.2f}')
     plt.savefig(os.path.join(SAVE_DIR, 'xgb_shap_summary_plot.png'), dpi=300, bbox_inches='tight')
     plt.show()
+
 
 if __name__ == "__main__":
     # Load and preprocess data

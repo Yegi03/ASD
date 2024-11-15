@@ -11,7 +11,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
-
+from sklearn.metrics import roc_auc_score, roc_curve
+import seaborn as sns
 # Import configurations and data processing functions
 from src.data_preprocessing.data_preprocessing import preprocess_data
 from src.utils.config import DATA_PATHS, SAVE_DIR, TRAIN_TEST_SPLIT, MODEL_PARAMS
@@ -46,6 +47,13 @@ def train_gradient_boosting(X_train, X_test, y_train, y_test):
     X_train_pca = pca.fit_transform(X_train)
     X_test_pca = pca.transform(X_test)
 
+    # Preserve PCA component names
+    pca_feature_names = [f"PCA_{i+1}" for i in range(pca.n_components_)]
+
+    # Map target labels to {0, 1}
+    y_train_mapped = y_train.map({1: 0, 2: 1})
+    y_test_mapped = y_test.map({1: 0, 2: 1})
+
     # Set up pipeline with scaling and Gradient Boosting
     pipe = Pipeline([
         ('scaler', StandardScaler()),
@@ -62,32 +70,47 @@ def train_gradient_boosting(X_train, X_test, y_train, y_test):
 
     # Run grid search
     grid_search = GridSearchCV(pipe, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
-    grid_search.fit(X_train_pca, y_train)
+    grid_search.fit(X_train_pca, y_train_mapped)
 
     # Get the best model
     best_model = grid_search.best_estimator_
     logging.info(f"Best parameters: {grid_search.best_params_}")
     logging.info(f"Best cross-validation accuracy: {grid_search.best_score_}")
 
-    # Evaluate on test data
+    # Predict probabilities and classes
+    y_proba = best_model.predict_proba(X_test_pca)[:, 1]  # Probability for positive class
     y_pred = best_model.predict(X_test_pca)
-    accuracy = accuracy_score(y_test, y_pred)
-    logging.info(f"Test Accuracy: {accuracy}")
-    logging.info("Classification Report:\n" + classification_report(y_test, y_pred))
-    logging.info(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
 
-    # Save model and PCA transformer
-    joblib.dump(best_model, os.path.join(SAVE_DIR, "gbm_model.pkl"))
-    joblib.dump(pca, os.path.join(SAVE_DIR, "gbm_pca.pkl"))
-    logging.info("Model and PCA transformer saved.")
+    # Metrics
+    accuracy = accuracy_score(y_test_mapped, y_pred)
+    auc = roc_auc_score(y_test_mapped, y_proba)
+    logging.info(f"Test Accuracy: {accuracy}")
+    logging.info(f"AUC-ROC: {auc}")
+
+    # Plot ROC Curve
+    fpr, tpr, _ = roc_curve(y_test_mapped, y_proba)
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"GBM (AUC = {auc:.2f})")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend(loc="lower right")
+    plt.savefig(os.path.join(SAVE_DIR, "gbm_roc_curve.png"))
+    plt.show()
 
     # SHAP explanations
     explainer = shap.Explainer(best_model.named_steps['gbm'], X_train_pca)
     shap_values = explainer(X_test_pca)
     plt.figure()
-    shap.summary_plot(shap_values, X_test_pca, show=False)
-    plt.savefig(os.path.join(SAVE_DIR, "shap_summary.png"))
+    shap.summary_plot(shap_values, X_test_pca, feature_names=pca_feature_names, show=False)
+    # plt.title("\nSHAP Summary Plot - Gradient Boosting")
+    plt.savefig(os.path.join(SAVE_DIR, "gbm_shap_summary.png"))
     plt.show()
+
+    # Save model and PCA transformer
+    joblib.dump(best_model, os.path.join(SAVE_DIR, "gbm_model.pkl"))
+    joblib.dump(pca, os.path.join(SAVE_DIR, "gbm_pca.pkl"))
+    logging.info("Model and PCA transformer saved.")
 
 if __name__ == "__main__":
     # Load and preprocess data
