@@ -4,90 +4,111 @@ import joblib
 import shap
 import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score, roc_curve
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import roc_auc_score, roc_curve
-import seaborn as sns
-# Import configurations and data processing functions
 from src.data_preprocessing.data_preprocessing import preprocess_data
-from src.utils.config import DATA_PATHS, SAVE_DIR, TRAIN_TEST_SPLIT, MODEL_PARAMS
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+
 def load_data():
-    """Load data from the specified paths in the config file."""
-    logging.info("Loading data...")
-    phenotypic_data = pd.read_csv(DATA_PATHS["phenotypic"], encoding="ISO-8859-1")
-    anat_qap = pd.read_csv(DATA_PATHS["anat_qap"], encoding="ISO-8859-1")
-    dti_qap = pd.read_csv(DATA_PATHS["dti_qap"], encoding="ISO-8859-1")
-    functional_qap = pd.read_csv(DATA_PATHS["functional_qap"], encoding="ISO-8859-1")
-    return phenotypic_data, anat_qap, dti_qap, functional_qap
+    """Load and preprocess data."""
+    logging.info("Starting data preprocessing...")
 
-def train_gradient_boosting(X_train, X_test, y_train, y_test):
-    """Train the Gradient Boosting Model with PCA and Grid Search for hyperparameter tuning."""
-    logging.info("Training Gradient Boosting Model...")
+    # Correct path to the root directory
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 
-    # Ensure all features are numeric by removing non-numeric columns
+    # Define the correct data paths
+    phenotypic_data_path = os.path.join(root_dir, "data/ABIDEII_Composite_Phenotypic.csv")
+    anat_qap_path = os.path.join(root_dir, "data/ABIDEII_MRI_Quality_Metrics/anat_qap.csv")
+    dti_qap_path = os.path.join(root_dir, "data/ABIDEII_MRI_Quality_Metrics/dti_qap.csv")
+    functional_qap_path = os.path.join(root_dir, "data/ABIDEII_MRI_Quality_Metrics/functional_qap.csv")
+
+    # Preprocess the data using the correct paths
+    X, y = preprocess_data(
+        phenotypic_path=phenotypic_data_path,
+        anat_qap_path=anat_qap_path,
+        dti_qap_path=dti_qap_path,
+        functional_qap_path=functional_qap_path
+    )
+
+    if X is None or y is None:
+        logging.error("Data preprocessing failed.")
+        raise FileNotFoundError("One or more data files are missing or could not be processed.")
+
+    logging.info("Data successfully loaded and preprocessed.")
+    return X, y
+
+
+def train_gradient_boosting(X_train, X_test, y_train, y_test, cv_folds=5):
+    """Train the Gradient Boosting Model."""
+    logging.info(f"Training Gradient Boosting Model with {cv_folds}-fold Cross-Validation...")
+    print(f"\n=== Training Gradient Boosting Model with {cv_folds}-fold Cross-Validation ===")
+
+    # Ensure all features are numeric
+    print(f"Original Training Data Shape: {X_train.shape}")
+    print(f"Original Test Data Shape: {X_test.shape}")
     X_train = X_train.select_dtypes(include=['number'])
     X_test = X_test.select_dtypes(include=['number'])
+    print(f"Numeric Training Data Shape: {X_train.shape}")
+    print(f"Numeric Test Data Shape: {X_test.shape}")
 
-    # Handle any remaining NaN values by imputing with mean
+    # Handle NaN values
     imputer = SimpleImputer(strategy='mean')
     X_train = imputer.fit_transform(X_train)
     X_test = imputer.transform(X_test)
 
-    # Apply PCA for dimensionality reduction
-    pca = PCA(n_components=50, random_state=MODEL_PARAMS['gbm']["random_state"])
-    X_train_pca = pca.fit_transform(X_train)
-    X_test_pca = pca.transform(X_test)
+    print(f"Imputed Training Data Shape: {X_train.shape}")
+    print(f"Imputed Test Data Shape: {X_test.shape}")
 
-    # Preserve PCA component names
-    pca_feature_names = [f"PCA_{i+1}" for i in range(pca.n_components_)]
-
-    # Map target labels to {0, 1}
+    # Map target labels to {0, 1} if necessary
     y_train_mapped = y_train.map({1: 0, 2: 1})
     y_test_mapped = y_test.map({1: 0, 2: 1})
 
-    # Set up pipeline with scaling and Gradient Boosting
+    # Pipeline setup
     pipe = Pipeline([
         ('scaler', StandardScaler()),
-        ('gbm', GradientBoostingClassifier(random_state=MODEL_PARAMS['gbm']["random_state"]))
+        ('gbm', GradientBoostingClassifier(random_state=42))
     ])
 
-    # Define grid search parameters from config
+    # Grid Search Parameters
     param_grid = {
-        'gbm__n_estimators': MODEL_PARAMS['gbm']["n_estimators"],
-        'gbm__learning_rate': MODEL_PARAMS['gbm']["learning_rate"],
-        'gbm__max_depth': MODEL_PARAMS['gbm']["max_depth"],
-        'gbm__min_samples_split': MODEL_PARAMS['gbm']["min_samples_split"]
+        'gbm__n_estimators': [50, 100, 150],
+        'gbm__learning_rate': [0.01, 0.1, 0.2],
+        'gbm__max_depth': [3, 5, 7],
+        'gbm__min_samples_split': [2, 5, 10]
     }
 
-    # Run grid search
-    grid_search = GridSearchCV(pipe, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
-    grid_search.fit(X_train_pca, y_train_mapped)
+    # Grid Search
+    grid_search = GridSearchCV(pipe, param_grid, cv=cv_folds, scoring='accuracy', n_jobs=-1, verbose=1)
+    grid_search.fit(X_train, y_train_mapped)
 
-    # Get the best model
+    # Best Model
     best_model = grid_search.best_estimator_
-    logging.info(f"Best parameters: {grid_search.best_params_}")
-    logging.info(f"Best cross-validation accuracy: {grid_search.best_score_}")
+    print(f"Best Parameters: {grid_search.best_params_}")
+    print(f"Best Cross-Validation Score: {grid_search.best_score_}")
+    logging.info(f"Best Parameters: {grid_search.best_params_}")
+    logging.info(f"Best Cross-Validation Score: {grid_search.best_score_}")
 
-    # Predict probabilities and classes
-    y_proba = best_model.predict_proba(X_test_pca)[:, 1]  # Probability for positive class
-    y_pred = best_model.predict(X_test_pca)
+    # Predictions
+    y_proba = best_model.predict_proba(X_test)[:, 1]
+    y_pred = best_model.predict(X_test)
 
     # Metrics
     accuracy = accuracy_score(y_test_mapped, y_pred)
     auc = roc_auc_score(y_test_mapped, y_proba)
+    print(f"Test Accuracy: {accuracy}")
+    print(f"AUC-ROC: {auc}")
     logging.info(f"Test Accuracy: {accuracy}")
     logging.info(f"AUC-ROC: {auc}")
 
-    # Plot ROC Curve
+    # ROC Curve
     fpr, tpr, _ = roc_curve(y_test_mapped, y_proba)
     plt.figure()
     plt.plot(fpr, tpr, label=f"GBM (AUC = {auc:.2f})")
@@ -95,36 +116,48 @@ def train_gradient_boosting(X_train, X_test, y_train, y_test):
     plt.ylabel("True Positive Rate")
     plt.title("ROC Curve")
     plt.legend(loc="lower right")
-    plt.savefig(os.path.join(SAVE_DIR, "gbm_roc_curve.png"))
+    plt.savefig(f"roc_curve_{cv_folds}_folds.png")
     plt.show()
 
-    # SHAP explanations
-    explainer = shap.Explainer(best_model.named_steps['gbm'], X_train_pca)
-    shap_values = explainer(X_test_pca)
+    # Confusion Matrix
+    cm = confusion_matrix(y_test_mapped, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title("Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.savefig(f"confusion_matrix_{cv_folds}_folds.png")
+    plt.show()
+
+    # SHAP Explanation
+    explainer = shap.Explainer(best_model.named_steps['gbm'], X_train)
+    shap_values = explainer(X_test)
+
+    # SHAP Summary Plot
     plt.figure()
-    shap.summary_plot(shap_values, X_test_pca, feature_names=pca_feature_names, show=False)
-    # plt.title("\nSHAP Summary Plot - Gradient Boosting")
-    plt.savefig(os.path.join(SAVE_DIR, "gbm_shap_summary.png"))
-    plt.show()
+    shap.summary_plot(shap_values, X_test, show=False)
+    plt.savefig(f"shap_summary_{cv_folds}_folds.png")
+    plt.close()
 
-    # Save model and PCA transformer
-    joblib.dump(best_model, os.path.join(SAVE_DIR, "gbm_model.pkl"))
-    joblib.dump(pca, os.path.join(SAVE_DIR, "gbm_pca.pkl"))
-    logging.info("Model and PCA transformer saved.")
+    # Save Model
+    joblib.dump(best_model, f"gbm_model_{cv_folds}_folds.pkl")
+    logging.info(f"Model saved as 'gbm_model_{cv_folds}_folds.pkl'.")
+
 
 if __name__ == "__main__":
-    # Load and preprocess data
-    phenotypic_data, anat_qap, dti_qap, functional_qap = load_data()
-    X, y = preprocess_data(phenotypic_data, anat_qap, dti_qap, functional_qap)
+    try:
+        # Load data
+        logging.info("Loading and preprocessing data...")
+        X, y = load_data()
 
-    # Check dataset size
-    sample_size = X.shape[0]
-    logging.info(f"Sample size: {sample_size}")
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        print(f"Training Data Shape: {X_train.shape}")
+        print(f"Test Data Shape: {X_test.shape}")
 
-    # Split the data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=TRAIN_TEST_SPLIT["test_size"], random_state=TRAIN_TEST_SPLIT["random_state"]
-    )
+        # Train with 5, 7, and 10 folds
+        for folds in [5, 7, 10]:
+            print(f"\n=== Training with {folds}-fold Cross-Validation ===")
+            train_gradient_boosting(X_train, X_test, y_train, y_test, cv_folds=folds)
 
-    # Train the model
-    train_gradient_boosting(X_train, X_test, y_train, y_test)
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")

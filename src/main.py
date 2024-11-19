@@ -1,1 +1,1 @@
-#I've ran each model seprately after runningnthe
+#I've ran each model directly

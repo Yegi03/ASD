@@ -1,90 +1,137 @@
-import pandas as pd
-import logging
-from sklearn.preprocessing import StandardScaler
-from src.utils.config import TARGET_LABEL  # Assuming you add TARGET_LABEL to config
 
-def preprocess_data(phenotypic_data, anat_qap, dti_qap, functional_qap):
-    logging.info("Preprocessing data...")
+
+import os
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def standardize_column_names(df, standard_names):
+    """Renames columns based on a dictionary of standard names."""
+    df.rename(columns=standard_names, inplace=True)
+
+def merge_data(df1, df2, df3, df4, on, how='outer'):
+    """Merges four dataframes on specified columns using the specified method."""
+    return df1.merge(df2, on=on, how=how).merge(df3, on=on, how=how).merge(df4, on=on, how=how)
+
+def preprocess_features(X):
+    """Preprocess numeric features: fill missing values and scale."""
+    # Separate numeric and non-numeric columns
+    numeric_cols = X.select_dtypes(include=['number']).columns
+    non_numeric_cols = X.select_dtypes(exclude=['number']).columns
+
+    # Log non-numeric columns
+    logging.info(f"Non-numeric columns excluded from scaling: {non_numeric_cols.tolist()}")
+
+    # Process numeric columns
+    X_numeric = X[numeric_cols]
+    X_filled = X_numeric.fillna(X_numeric.mean())  # Fill NaNs with mean
+    scaler = StandardScaler()
+    X_scaled = pd.DataFrame(scaler.fit_transform(X_filled), columns=X_numeric.columns)
+
+    # Combine numeric and non-numeric columns
+    X_preprocessed = pd.concat([X_scaled, X[non_numeric_cols].reset_index(drop=True)], axis=1)
+    return X_preprocessed
+
+def diagnose_merge(phenotypic_data, anat_qap, dti_qap, functional_qap):
+    """Diagnoses potential issues in merging by checking key overlaps."""
+    datasets = {"phenotypic_data": phenotypic_data, "anat_qap": anat_qap, "dti_qap": dti_qap, "functional_qap": functional_qap}
+    for name, df in datasets.items():
+        logging.info(f"{name}: Unique SUB_IDs = {len(df['SUB_ID'].unique())}, Unique SITE_IDs = {len(df['SITE_ID'].unique())}")
+
+    for name, df in datasets.items():
+        for other_name, other_df in datasets.items():
+            if name != other_name:
+                unmatched = df[~df['SUB_ID'].isin(other_df['SUB_ID'])]
+                logging.info(f"SUB_IDs in {name} not in {other_name}: {len(unmatched)}")
+
+def preprocess_data(phenotypic_path, anat_qap_path, dti_qap_path, functional_qap_path, target_label='DX_GROUP'):
+    """
+    Preprocesses the data from the given paths and returns features (X) and target (y).
+    """
+    logging.info("Starting data preprocessing...")
+
+    # Load datasets
+    try:
+        logging.info(f"Loading Phenotypic Data from: {phenotypic_path}")
+        phenotypic_data = pd.read_csv(phenotypic_path, encoding='latin1')
+
+        logging.info(f"Loading Anat QAP Data from: {anat_qap_path}")
+        anat_qap = pd.read_csv(anat_qap_path, encoding='latin1')
+
+        logging.info(f"Loading DTI QAP Data from: {dti_qap_path}")
+        dti_qap = pd.read_csv(dti_qap_path, encoding='latin1')
+
+        logging.info(f"Loading Functional QAP Data from: {functional_qap_path}")
+        functional_qap = pd.read_csv(functional_qap_path, encoding='latin1')
+    except FileNotFoundError as e:
+        logging.error(f"File not found: {e}")
+        return None, None
+    except Exception as e:
+        logging.error(f"Error loading data: {e}")
+        return None, None
 
     # Standardize column names
-    rename_columns(phenotypic_data, anat_qap, dti_qap, functional_qap)
+    column_mapping = {'Sub_ID': 'SUB_ID', 'Site_ID': 'SITE_ID'}
+    standardize_column_names(phenotypic_data, column_mapping)
+    standardize_column_names(anat_qap, column_mapping)
+    standardize_column_names(dti_qap, column_mapping)
+    standardize_column_names(functional_qap, column_mapping)
+
+    # Diagnose merge
+    diagnose_merge(phenotypic_data, anat_qap, dti_qap, functional_qap)
 
     # Merge data
-    merged_data = phenotypic_data.merge(anat_qap, on=['SUB_ID', 'SITE_ID'], how='inner') \
-        .merge(dti_qap, on=['SUB_ID', 'SITE_ID'], how='inner') \
-        .merge(functional_qap, on=['SUB_ID', 'SITE_ID'], how='inner')
-    logging.info(f"Merged data shape: {merged_data.shape}")
+    merged_data = merge_data(
+        phenotypic_data, anat_qap, dti_qap, functional_qap,
+        on=['SUB_ID', 'SITE_ID'], how='outer'
+    )
+    logging.info(f"Merged Data Shape (outer join): {merged_data.shape}")
 
-    # Define target label and separate X, y
-    if TARGET_LABEL in merged_data.columns:
-        merged_data = merged_data.dropna(subset=[TARGET_LABEL])
-        X = merged_data.drop(columns=[TARGET_LABEL])
-        y = merged_data[TARGET_LABEL]
-        logging.info(f"Features shape: {X.shape}, Target shape: {y.shape}")
+    # Log missing data
+    missing_counts = merged_data.isnull().sum()
+    logging.info(f"Missing values after merge:\n{missing_counts}")
+
+    # Check for target variable
+    if target_label not in merged_data.columns:
+        logging.error(f"Target label '{target_label}' not found in the merged data.")
+        return None, None
     else:
-        raise ValueError(f"Target label '{TARGET_LABEL}' not found in the merged data.")
+        logging.info(f"Target label '{target_label}' is present.")
 
-    # Fill NaNs in numeric data
-    X = fill_nans(X)
+    # Log target label distribution
+    target_counts = merged_data[target_label].value_counts()
+    logging.info(f"Target label distribution:\n{target_counts}")
 
-    # Log numeric columns
-    X_numeric = X.select_dtypes(include=['number'])
-    logging.info(f"Columns in X_numeric: {X_numeric.columns.tolist()}")
+    # Prepare features and target
+    merged_data = merged_data.dropna(subset=[target_label])  # Ensure target label has no NaNs
+    X = merged_data.drop(columns=[target_label])
+    y = merged_data[target_label]
 
-    # Outlier removal
-    columns_to_check = [col for col in ['AGE_AT_SCAN', 'CNR', 'SNR'] if col in X_numeric.columns]
-    X = remove_outliers(X, columns_to_check=columns_to_check, z_threshold=4)
-    logging.info(f"Data shape after selective outlier removal: {X.shape}")
+    # Preprocess features
+    try:
+        X_preprocessed = preprocess_features(X)
+    except Exception as e:
+        logging.error(f"Error during feature preprocessing: {e}")
+        return None, None
 
-    # Scale numeric features
-    X = scale_features(X)
+    logging.info("Data preprocessing completed successfully.")
+    return X_preprocessed, y
 
-    return X, y
+if __name__ == '__main__':
+    # Update paths to absolute paths
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    phenotypic_path = os.path.join(base_path, '../../data/ABIDEII_Composite_Phenotypic.csv')
+    anat_qap_path = os.path.join(base_path, '../../data/ABIDEII_MRI_Quality_Metrics/anat_qap.csv')
+    dti_qap_path = os.path.join(base_path, '../../data/ABIDEII_MRI_Quality_Metrics/dti_qap.csv')
+    functional_qap_path = os.path.join(base_path, '../../data/ABIDEII_MRI_Quality_Metrics/functional_qap.csv')
 
-def rename_columns(*dfs):
-    """Renames columns across dataframes to standardize merging."""
-    for df in dfs:
-        df.rename(columns={'Sub_ID': 'SUB_ID', 'Site_ID': 'SITE_ID'}, inplace=True)
+    X, y = preprocess_data(phenotypic_path, anat_qap_path, dti_qap_path, functional_qap_path)
 
-
-def fill_nans(X):
-    """Fill NaNs in numeric columns with column means and handle infinities."""
-    X_numeric = X.select_dtypes(include=['number'])
-
-    # Fill NaN values with the mean of each column
-    X_numeric_filled = X_numeric.fillna(X_numeric.mean())
-
-    # Replace any infinities with the mean of each respective column
-    for col in X_numeric_filled.columns:
-        col_mean = X_numeric_filled[col].mean()
-        X_numeric_filled[col] = X_numeric_filled[col].replace([float('inf'), -float('inf')], col_mean)
-
-    # Handle non-numeric columns separately
-    X_non_numeric = X.select_dtypes(exclude=['number'])
-
-    return pd.concat([X_numeric_filled, X_non_numeric], axis=1)
-
-
-def remove_outliers(X, columns_to_check=None, z_threshold=4):
-    """Remove rows with outliers based on specific columns and z-score threshold."""
-    X_numeric = X.select_dtypes(include=['number'])
-    initial_shape = X.shape[0]
-
-    for col in columns_to_check:
-        col_z_scores = ((X_numeric[col] - X_numeric[col].mean()) / X_numeric[col].std()).abs()
-        rows_with_outliers = (col_z_scores > z_threshold).sum()
-        logging.info(f"Outliers in {col}: {rows_with_outliers} rows flagged.")
-        X = X[col_z_scores <= z_threshold]
-
-    rows_removed = initial_shape - X.shape[0]
-    logging.info(f"Total rows removed due to outliers: {rows_removed}")
-    return X
-
-def scale_features(X):
-    """Standardize numeric features."""
-    X_numeric = X.select_dtypes(include=['number'])
-    scaler = StandardScaler()
-    X_scaled = pd.DataFrame(scaler.fit_transform(X_numeric), columns=X_numeric.columns)
-    X = pd.concat([X_scaled, X.select_dtypes(exclude=['number'])], axis=1)
-    logging.info("Numeric features scaled.")
-    return X
+    if X is not None and y is not None:
+        logging.info(f"Preprocessed features shape: {X.shape}")
+        logging.info(f"Target variable shape: {y.shape}")
+    else:
+        logging.error("Data preprocessing failed.")
